@@ -1,0 +1,1599 @@
+---
+title: "Live Three or Die Trying"
+subtitle: "Does the NBA Three-Point Premium Still Exist?"
+author: "DJ Barry"
+output:
+  html_document:
+    theme: flatly
+    df_print: paged
+---
+
+```{r title-image, echo=FALSE, out.width='100%', fig.align='center'}
+knitr::include_graphics("steph3.png")
+```
+
+
+
+<style>
+body {
+  font-size: 16px;
+  line-height: 1.65;
+  color: #1f2933;
+  background-color: #ffffff;
+}
+
+h1.title {
+  font-weight: 850;
+  color: #102a43;
+  margin-bottom: 4px;
+  letter-spacing: -0.3px;
+}
+
+h3.subtitle {
+  color: #52616b;
+  font-weight: 500;
+  margin-top: 0;
+  margin-bottom: 20px;
+}
+
+h4.author,
+h4.date {
+  color: #6b7280;
+  font-weight: 500;
+}
+
+h2 {
+  color: #102a43;
+  font-weight: 800;
+  border-bottom: 3px solid #d9e2ec;
+  padding-bottom: 7px;
+  margin-top: 38px;
+  margin-bottom: 18px;
+  letter-spacing: -0.2px;
+}
+
+h3 {
+  color: #1f4e79;
+  font-weight: 750;
+  margin-top: 26px;
+}
+
+p {
+  margin-bottom: 15px;
+}
+
+strong {
+  color: #102a43;
+}
+
+table {
+  margin-left: auto;
+  margin-right: auto;
+}
+
+.caption {
+  color: #52616b;
+  font-size: 13px;
+}
+
+.gt_table {
+  margin-top: 12px;
+  margin-bottom: 24px;
+  box-shadow: 0 8px 22px rgba(15, 23, 42, 0.08);
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+.figure {
+  margin-top: 12px;
+  margin-bottom: 22px;
+}
+
+blockquote {
+  border-left: 4px solid #1f4e79;
+  padding-left: 14px;
+  color: #374151;
+  background: #f8fafc;
+}
+</style>
+
+```{r section-0-setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = FALSE,
+  warning = FALSE,
+  message = FALSE,
+  fig.align = "center",
+  fig.width = 10,
+  fig.height = 6,
+  out.width = "95%"
+)
+
+library(tidyverse)
+library(janitor)
+library(scales)
+library(gt)
+library(glue)
+library(ggrepel)
+library(broom)
+
+set.seed(2345)
+
+theme_set(
+  theme_minimal(base_size = 13) +
+    theme(
+      plot.background = element_rect(fill = "white", color = NA),
+      panel.background = element_rect(fill = "white", color = NA),
+      panel.grid.major = element_line(color = "#e5e7eb", linewidth = 0.35),
+      panel.grid.minor = element_blank(),
+
+      plot.title = element_text(
+        face = "bold",
+        size = 18,
+        color = "#102a43",
+        margin = margin(b = 6)
+      ),
+      plot.subtitle = element_text(
+        size = 12.5,
+        color = "#52616b",
+        margin = margin(b = 12)
+      ),
+      plot.caption = element_text(
+        size = 9.5,
+        color = "#6b7280",
+        hjust = 0,
+        margin = margin(t = 10)
+      ),
+
+      axis.title = element_text(
+        face = "bold",
+        color = "#102a43"
+      ),
+      axis.text = element_text(
+        color = "#374151"
+      ),
+
+      legend.position = "bottom",
+      legend.title = element_text(
+        face = "bold",
+        color = "#102a43"
+      ),
+      legend.text = element_text(
+        color = "#374151",
+        size = 10
+      ),
+
+      strip.text = element_text(
+        face = "bold",
+        color = "#102a43"
+      )
+    )
+)
+
+season_selected <- 2026
+
+cluster_k_simple <- 4
+cluster_k_expanded <- 4
+cluster_k_max <- 10
+
+cluster_palette <- c(
+  "#d4a017",
+  "#1d4ed8",
+  "#15803d",
+  "#b91c1c"
+)
+
+data_dir <- "."
+output_dir <- "outputs"
+
+dir.create(output_dir, showWarnings = FALSE)
+
+team_advanced_file <- file.path(data_dir, "team_advanced.csv")
+
+pct_fmt <- function(x, accuracy = 0.1) {
+  scales::percent(x, accuracy = accuracy)
+}
+
+num_fmt <- function(x, accuracy = 0.1) {
+  scales::number(x, accuracy = accuracy)
+}
+
+rate_fmt <- function(x, accuracy = 0.001) {
+  scales::number(x, accuracy = accuracy)
+}
+
+clean_team_name <- function(x) {
+  x %>%
+    str_replace_all("\\*", "") %>%
+    str_squish()
+}
+
+normalize_rate <- function(x) {
+  x <- suppressWarnings(as.numeric(x))
+
+  if_else(
+    !is.na(x) & x > 1,
+    x / 100,
+    x
+  )
+}
+
+find_source_col <- function(data, candidates) {
+  original_names <- names(data)
+
+  clean_names <- original_names %>%
+    str_replace_all("\u00a0", " ") %>%
+    str_squish() %>%
+    str_remove("\\.\\.\\.[0-9]+$")
+
+  match_index <- which(clean_names %in% candidates)
+
+  if (length(match_index) == 0) {
+    stop(glue::glue("Missing required column: {paste(candidates, collapse = ' or ')}"))
+  }
+
+  original_names[match_index[1]]
+}
+
+team_abbrev_lookup <- tibble::tribble(
+  ~Team, ~Tm,
+  "Atlanta Hawks", "ATL",
+  "Boston Celtics", "BOS",
+  "Brooklyn Nets", "BRK",
+  "Charlotte Hornets", "CHO",
+  "Chicago Bulls", "CHI",
+  "Cleveland Cavaliers", "CLE",
+  "Dallas Mavericks", "DAL",
+  "Denver Nuggets", "DEN",
+  "Detroit Pistons", "DET",
+  "Golden State Warriors", "GSW",
+  "Houston Rockets", "HOU",
+  "Indiana Pacers", "IND",
+  "Los Angeles Clippers", "LAC",
+  "Los Angeles Lakers", "LAL",
+  "Memphis Grizzlies", "MEM",
+  "Miami Heat", "MIA",
+  "Milwaukee Bucks", "MIL",
+  "Minnesota Timberwolves", "MIN",
+  "New Orleans Pelicans", "NOP",
+  "New York Knicks", "NYK",
+  "Oklahoma City Thunder", "OKC",
+  "Orlando Magic", "ORL",
+  "Philadelphia 76ers", "PHI",
+  "Phoenix Suns", "PHO",
+  "Portland Trail Blazers", "POR",
+  "Sacramento Kings", "SAC",
+  "San Antonio Spurs", "SAS",
+  "Toronto Raptors", "TOR",
+  "Utah Jazz", "UTA",
+  "Washington Wizards", "WAS"
+)
+
+assign_cluster_label_simple <- function(data) {
+  data %>%
+    mutate(
+      Cluster_Label = case_when(
+        `3PAr` >= median(`3PAr`, na.rm = TRUE) &
+          `TS%` >= median(`TS%`, na.rm = TRUE) ~ "High 3PA / High Efficiency",
+
+        `3PAr` >= median(`3PAr`, na.rm = TRUE) &
+          `TS%` < median(`TS%`, na.rm = TRUE) ~ "High 3PA / Lower Efficiency",
+
+        `3PAr` < median(`3PAr`, na.rm = TRUE) &
+          `TS%` >= median(`TS%`, na.rm = TRUE) ~ "Lower 3PA / High Efficiency",
+
+        TRUE ~ "Lower 3PA / Lower Efficiency"
+      )
+    )
+}
+
+assign_cluster_label_expanded <- function(data) {
+  data %>%
+    mutate(
+      Cluster_Label = case_when(
+        `3PAr` >= median(`3PAr`, na.rm = TRUE) &
+          `TS%` >= median(`TS%`, na.rm = TRUE) &
+          FTr >= median(FTr, na.rm = TRUE) ~ "Spacing Plus Foul Pressure",
+
+        `3PAr` >= median(`3PAr`, na.rm = TRUE) &
+          `TS%` >= median(`TS%`, na.rm = TRUE) ~ "Efficient Perimeter Offense",
+
+        `3PAr` >= median(`3PAr`, na.rm = TRUE) &
+          `TS%` < median(`TS%`, na.rm = TRUE) ~ "Three-Heavy Without Premium",
+
+        `3PAr` < median(`3PAr`, na.rm = TRUE) &
+          FTr >= median(FTr, na.rm = TRUE) ~ "Rim and Free Throw Pressure",
+
+        TRUE ~ "Mixed Lower Efficiency"
+      )
+    )
+}
+
+make_wcss_table <- function(cluster_input, max_k = 10, nstart = 50) {
+  max_k_safe <- min(max_k, nrow(cluster_input) - 1)
+
+  tibble(
+    k = 1:max_k_safe
+  ) %>%
+    mutate(
+      wcss = map_dbl(
+        k,
+        ~ kmeans(
+          cluster_input,
+          centers = .x,
+          nstart = nstart
+        )$tot.withinss
+      )
+    )
+}
+
+style_article_gt <- function(gt_tbl, header_color = "#17324d", column_color = "#d9e2ec") {
+  gt_tbl %>%
+    tab_style(
+      style = list(
+        cell_fill(color = header_color),
+        cell_text(color = "white", weight = "bold")
+      ),
+      locations = cells_title(groups = "title")
+    ) %>%
+    tab_style(
+      style = list(
+        cell_fill(color = "#f1f5f9"),
+        cell_text(color = "#334e68", weight = "normal")
+      ),
+      locations = cells_title(groups = "subtitle")
+    ) %>%
+    tab_style(
+      style = list(
+        cell_fill(color = column_color),
+        cell_text(color = "#102a43", weight = "bold")
+      ),
+      locations = cells_column_labels(everything())
+    ) %>%
+    tab_style(
+      style = cell_text(color = "#1f2933"),
+      locations = cells_body()
+    ) %>%
+    tab_options(
+      table.font.size = px(13),
+      table.font.names = c("Arial", "Helvetica", "sans-serif"),
+      heading.title.font.size = px(18),
+      heading.subtitle.font.size = px(13),
+      heading.align = "left",
+      data_row.padding = px(7),
+      column_labels.padding = px(8),
+      table.align = "center",
+      table.width = pct(96),
+      table.border.top.color = "white",
+      table.border.bottom.color = "white",
+      table_body.border.top.color = "#cbd5e1",
+      table_body.border.bottom.color = "#cbd5e1",
+      column_labels.border.top.color = "#cbd5e1",
+      column_labels.border.bottom.color = "#cbd5e1",
+      row.striping.background_color = "#f8fafc"
+    ) %>%
+    opt_row_striping() %>%
+    opt_table_outline()
+}
+```
+
+
+
+
+
+
+
+```{r section-1-introductionA, results='asis'}
+cat(glue::glue("
+
+The Steph Curry era changed the way the NBA thought about the three-point shot. There was a time when the three felt like an inefficiency hiding in plain sight. The math was obvious. Three is worth more than two, and too many teams were still treating long twos like good offense. That NBA is gone. Teams learned the math, changed the spacing, and built offenses around the arc. The question now is not whether threes matter. They clearly do. The better question is whether the easy edge from simply taking more of them still exists.
+
+The premium is still there, but it is not as simple as it used to be. A Steph Curry three is different from an average player three. His range changes the floor, his movement changes the defense, and his shooting turns attempts that look questionable for most players into real offense. For most teams, more threes are not automatically better threes. The edge belongs to offenses that create the right looks, with the right shooters, while still pressuring the rim and forcing defenses to guard everything. The three-point revolution did not kill the premium. It made the premium harder to find.
+
+"))
+```
+
+## Sorting the League by Offensive Style
+
+```{r section-2-cluster-framework, results='asis'}
+cat(glue::glue("
+
+K-means clustering works here because NBA offenses do not all chase value the same way. Some teams stretch the floor through volume. Some win with efficiency. Others create pressure by getting downhill and drawing fouls. The point is not to rank teams from best to worst right away. The point is to sort them into offensive styles and then see which styles actually turn into efficient offense.
+
+The league is past the simple high-three versus low-three debate. A team can take a ton of threes and still be ordinary. Another team can take fewer threes but make up value through rim pressure, free throws, or cleaner shot quality. These clusters help separate those profiles instead of treating every three-point attempt like it carries the same value. Before building the model, the first step is to lay out the team offensive profiles that feed it.
+
+"))
+```
+------
+
+## The Modern Offensive Map
+
+```{r section-3-data}
+season_label <- glue::glue("{season_selected - 1}-{str_sub(season_selected, 3, 4)}")
+
+if (!exists("team_advanced_file")) {
+  team_advanced_file <- "team_advanced.csv"
+}
+
+if (!file.exists(team_advanced_file)) {
+  stop("team_advanced.csv was not found in the project folder.")
+}
+
+team_advanced_raw <- readr::read_csv(
+  team_advanced_file,
+  show_col_types = FALSE,
+  name_repair = "unique"
+)
+
+names(team_advanced_raw) <- names(team_advanced_raw) %>%
+  str_replace_all("\u00a0", " ") %>%
+  str_squish()
+
+team_col <- find_source_col(team_advanced_raw, "Team")
+w_col <- find_source_col(team_advanced_raw, "W")
+l_col <- find_source_col(team_advanced_raw, "L")
+ortg_col <- find_source_col(team_advanced_raw, "ORtg")
+drtg_col <- find_source_col(team_advanced_raw, "DRtg")
+nrtg_col <- find_source_col(team_advanced_raw, "NRtg")
+pace_col <- find_source_col(team_advanced_raw, "Pace")
+ftr_col <- find_source_col(team_advanced_raw, "FTr")
+threepar_col <- find_source_col(team_advanced_raw, "3PAr")
+ts_col <- find_source_col(team_advanced_raw, "TS%")
+efg_col <- find_source_col(team_advanced_raw, "eFG%")
+tov_col <- find_source_col(team_advanced_raw, "TOV%")
+orb_col <- find_source_col(team_advanced_raw, "ORB%")
+ftfga_col <- find_source_col(team_advanced_raw, "FT/FGA")
+
+team_advanced <- team_advanced_raw %>%
+  transmute(
+    Team = .data[[team_col]],
+    W = .data[[w_col]],
+    L = .data[[l_col]],
+    ORtg = .data[[ortg_col]],
+    DRtg = .data[[drtg_col]],
+    NRtg = .data[[nrtg_col]],
+    Pace = .data[[pace_col]],
+    FTr = .data[[ftr_col]],
+    `3PAr` = .data[[threepar_col]],
+    `TS%` = .data[[ts_col]],
+    `eFG%` = .data[[efg_col]],
+    `TOV%` = .data[[tov_col]],
+    `ORB%` = .data[[orb_col]],
+    `FT/FGA` = .data[[ftfga_col]]
+  ) %>%
+  filter(!is.na(Team)) %>%
+  filter(Team != "Team") %>%
+  filter(Team != "League Average") %>%
+  mutate(
+    Team = clean_team_name(Team),
+    across(-Team, ~ suppressWarnings(as.numeric(.x))),
+    across(
+      c(`3PAr`, `TS%`, FTr, `eFG%`, `TOV%`, `ORB%`, `FT/FGA`),
+      normalize_rate
+    )
+  ) %>%
+  left_join(team_abbrev_lookup, by = "Team") %>%
+  mutate(
+    Tm = coalesce(Tm, Team),
+    Games = W + L,
+    Win_Pct = W / Games
+  ) %>%
+  relocate(Tm, .after = Team)
+
+required_section_3_cols <- c(
+  "Team",
+  "Tm",
+  "W",
+  "L",
+  "ORtg",
+  "DRtg",
+  "NRtg",
+  "Pace",
+  "FTr",
+  "3PAr",
+  "TS%",
+  "eFG%",
+  "TOV%",
+  "ORB%",
+  "FT/FGA"
+)
+
+missing_section_3_cols <- setdiff(required_section_3_cols, names(team_advanced))
+
+if (length(missing_section_3_cols) > 0) {
+  stop(glue::glue("Missing required columns: {paste(missing_section_3_cols, collapse = ', ')}"))
+}
+
+league_average_row <- team_advanced %>%
+  summarise(
+    Team = "League Average",
+    Tm = "NBA",
+    W = NA_real_,
+    L = NA_real_,
+    Games = NA_real_,
+    Win_Pct = NA_real_,
+    ORtg = mean(ORtg, na.rm = TRUE),
+    DRtg = mean(DRtg, na.rm = TRUE),
+    NRtg = mean(NRtg, na.rm = TRUE),
+    Pace = mean(Pace, na.rm = TRUE),
+    FTr = mean(FTr, na.rm = TRUE),
+    `3PAr` = mean(`3PAr`, na.rm = TRUE),
+    `TS%` = mean(`TS%`, na.rm = TRUE),
+    `eFG%` = mean(`eFG%`, na.rm = TRUE),
+    `TOV%` = mean(`TOV%`, na.rm = TRUE),
+    `ORB%` = mean(`ORB%`, na.rm = TRUE),
+    `FT/FGA` = mean(`FT/FGA`, na.rm = TRUE)
+  )
+
+league_3par <- league_average_row %>% pull(`3PAr`) %>% first()
+league_ts <- league_average_row %>% pull(`TS%`) %>% first()
+league_ftr <- league_average_row %>% pull(FTr) %>% first()
+league_ortg <- league_average_row %>% pull(ORtg) %>% first()
+```
+
+```{r section-3-data-table-prep}
+team_snapshot_table <- team_advanced %>%
+  mutate(
+    ORtg_Rk = min_rank(desc(ORtg))
+  ) %>%
+  arrange(ORtg_Rk) %>%
+  select(
+    ORtg_Rk,
+    Tm,
+    W,
+    L,
+    Win_Pct,
+    ORtg,
+    NRtg,
+    `3PAr`,
+    `TS%`,
+    FTr
+  )
+```
+
+```{r section-3-data-table}
+profile_scale <- c(
+  "#991b1b",
+  "#ef4444",
+  "#f8fafc",
+  "#22c55e",
+  "#166534"
+)
+
+team_snapshot_table %>%
+  gt() %>%
+  tab_header(
+    title = md(glue::glue("**{season_label} NBA Team Offensive Profile**")),
+    subtitle = "Sorted by offensive rating rank."
+  ) %>%
+  fmt_percent(
+    columns = c(Win_Pct, `3PAr`, `TS%`, FTr),
+    decimals = 1
+  ) %>%
+  fmt_number(
+    columns = c(ORtg, NRtg),
+    decimals = 1
+  ) %>%
+  fmt_number(
+    columns = c(ORtg_Rk, W, L),
+    decimals = 0
+  ) %>%
+  cols_label(
+    ORtg_Rk = "ORtg Rk",
+    Tm = "Team",
+    W = "W",
+    L = "L",
+    Win_Pct = "Win%",
+    ORtg = "ORtg",
+    NRtg = "NRtg",
+    `3PAr` = "3PAr",
+    `TS%` = "TS%",
+    FTr = "FTr"
+  ) %>%
+  tab_spanner(
+    label = "Record",
+    columns = c(W, L, Win_Pct)
+  ) %>%
+  tab_spanner(
+    label = "Team Strength",
+    columns = c(ORtg, NRtg)
+  ) %>%
+  tab_spanner(
+    label = "Shot Profile",
+    columns = c(`3PAr`, `TS%`, FTr)
+  ) %>%
+  cols_align(
+    align = "center",
+    columns = c(
+      ORtg_Rk,
+      Tm,
+      W,
+      L,
+      Win_Pct,
+      ORtg,
+      NRtg,
+      `3PAr`,
+      `TS%`,
+      FTr
+    )
+  ) %>%
+  cols_width(
+    ORtg_Rk ~ px(75),
+    Tm ~ px(70),
+    W ~ px(55),
+    L ~ px(55),
+    Win_Pct ~ px(85),
+    ORtg ~ px(80),
+    NRtg ~ px(80),
+    `3PAr` ~ px(85),
+    `TS%` ~ px(85),
+    FTr ~ px(85)
+  ) %>%
+  style_article_gt(header_color = "#17324d", column_color = "#d9e2ec") %>%
+  data_color(
+    columns = c(Win_Pct),
+    palette = profile_scale,
+    autocolor_text = TRUE
+  ) %>%
+  data_color(
+    columns = c(`3PAr`),
+    palette = profile_scale,
+    autocolor_text = TRUE
+  ) %>%
+  data_color(
+    columns = c(`TS%`),
+    palette = profile_scale,
+    autocolor_text = TRUE
+  ) %>%
+  data_color(
+    columns = c(FTr),
+    palette = profile_scale,
+    autocolor_text = TRUE
+  ) %>%
+  tab_style(
+    style = list(
+      cell_fill(color = "#f8fafc"),
+      cell_text(weight = "bold", color = "#102a43")
+    ),
+    locations = cells_body(
+      columns = c(ORtg_Rk)
+    )
+  ) %>%
+  tab_style(
+    style = list(
+      cell_text(weight = "bold", color = "#102a43")
+    ),
+    locations = cells_body(
+      columns = c(Tm, ORtg)
+    )
+  ) %>%
+  tab_style(
+    style = list(
+      cell_text(weight = "bold")
+    ),
+    locations = cells_body(
+      columns = c(Win_Pct, `3PAr`, `TS%`, FTr)
+    )
+  ) %>%
+  tab_source_note(
+    source_note = "Green indicates higher values within each colored column. Red indicates lower values. For 3PAr and FTr, color shows offensive profile, not automatic shot quality."
+  )
+```
+
+```{r section-3-data-interpretation, results='asis'}
+cat(glue::glue("
+
+The first snapshot shows how spread out modern NBA offenses really are. 3PAr shows how much each team leans into the three-point shot, while TS% shows whether that shot profile is turning into efficient scoring. If the three-point edge were automatic, the teams taking the most threes would also separate cleanly near the top in efficiency. 
+
+The league is not that simple anymore. FTr matters because shot value is not only about where the ball is released. A possession that gets to the rim, creates contact, or forces defensive rotations can create value that a basic field-goal view misses. For the {season_label} season, the league average 3PAr is {pct_fmt(league_3par)}, the league average TS% is {pct_fmt(league_ts)}, the league average FTr is {pct_fmt(league_ftr)}, and the league average ORtg is {num_fmt(league_ortg)}. Those numbers set the baseline before the teams are sorted into offensive styles.
+
+"))
+```
+
+---------
+## Finding the Natural Groups
+
+```{r section-4-elbow-setup, results='asis'}
+cat(glue::glue("
+
+The next step is figuring out how many offensive styles the data naturally creates. Too few clusters would flatten the league into groups that are too broad. Too many would turn small differences into categories that do not mean much. The elbow method helps find the middle ground by showing how much tighter the clusters get as more groups are added.
+
+The goal is not to find a perfect mathematical truth. The goal is to pick a number that gives enough separation to tell a real basketball story. The simple version uses 3PAr and TS%, which tests the cleanest version of the three-point premium. The expanded version adds FTr and ORtg, which brings in foul pressure and overall offensive production.
+
+"))
+```
+
+```{r section-4-elbow-method}
+team_cluster_base <- team_advanced %>%
+  drop_na(`3PAr`, `TS%`, FTr, ORtg) %>%
+  mutate(
+    Team_Label = Tm
+  )
+
+cluster_input_simple <- team_cluster_base %>%
+  select(`3PAr`, `TS%`) %>%
+  scale()
+
+cluster_input_expanded <- team_cluster_base %>%
+  select(`3PAr`, `TS%`, FTr, ORtg) %>%
+  scale()
+
+simple_wcss <- make_wcss_table(
+  cluster_input = cluster_input_simple,
+  max_k = cluster_k_max,
+  nstart = 50
+) %>%
+  mutate(Model = "Simple: 3PAr and TS%")
+
+expanded_wcss <- make_wcss_table(
+  cluster_input = cluster_input_expanded,
+  max_k = cluster_k_max,
+  nstart = 50
+) %>%
+  mutate(Model = "Advanced: 3PAr, TS%, FTr, and ORtg")
+
+elbow_wcss <- bind_rows(
+  simple_wcss,
+  expanded_wcss
+)
+
+elbow_plot <- ggplot(
+  elbow_wcss,
+  aes(
+    x = k,
+    y = wcss,
+    group = Model,
+    color = Model
+  )
+) +
+  geom_line(linewidth = 1.1) +
+  geom_point(size = 3.5) +
+  geom_vline(
+    xintercept = cluster_k_simple,
+    linetype = "dashed",
+    linewidth = 0.8,
+    alpha = 0.7
+  ) +
+  scale_x_continuous(
+    breaks = sort(unique(elbow_wcss$k))
+  ) +
+  labs(
+    title = "Elbow Method for Choosing K",
+    subtitle = glue::glue("The dashed line marks k = {cluster_k_simple}, the cluster count used in this project."),
+    x = "Number of clusters",
+    y = "Within-cluster sum of squares",
+    color = "Model",
+    caption = "Lower WCSS means tighter clusters. The goal is to find where adding more clusters stops making the groupings meaningfully tighter."
+  )
+
+print(elbow_plot)
+```
+
+```{r section-4-elbow-interpretation, results='asis'}
+cat(glue::glue("
+Four clusters gives the cleanest balance between detail and readability. The biggest improvements come early, and after that the gains start to shrink. Four groups also make basketball sense without pretending every small difference needs its own label.
+
+That structure gives the article a simple way to sort the league. Teams can be high-volume and efficient, high-volume but less efficient, lower-volume but efficient, or lower-volume and struggling. From there, the real question becomes whether three-point volume still separates the best offenses, or whether the edge now depends on the rest of the shot profile around it.
+"))
+```
+
+
+## Volume Alone Is Not the Edge
+
+```{r section-5-simple-clustering-setup, results='asis'}
+cat(glue::glue("
+
+The first cut keeps the analysis simple. It uses only 3PAr and TS%, which is the cleanest way to test the old three-point argument. If volume still carried the premium by itself, the teams taking more threes would also be the teams separating in scoring efficiency.
+
+The modern NBA makes that worth testing. The league has already moved toward the arc, so the question is no longer whether threes are valuable. The question is whether more three-point volume still creates an edge once almost everyone understands the math. This view is intentionally limited, but that is the point. It shows the relationship between shot profile and efficiency before adding foul pressure or total offensive output.
+
+
+"))
+```
+
+```{r section-5-simple-clustering}
+if (!exists("team_cluster_base")) {
+  team_cluster_base <- team_advanced %>%
+    drop_na(`3PAr`, `TS%`, FTr, ORtg) %>%
+    mutate(
+      Team_Label = Tm
+    )
+}
+
+cluster_input_simple <- team_cluster_base %>%
+  select(`3PAr`, `TS%`) %>%
+  scale()
+
+simple_kmeans <- kmeans(
+  cluster_input_simple,
+  centers = cluster_k_simple,
+  nstart = 50
+)
+
+team_cluster_simple <- team_cluster_base %>%
+  mutate(
+    Cluster = factor(simple_kmeans$cluster)
+  )
+
+cluster_centers_simple <- team_cluster_simple %>%
+  group_by(Cluster) %>%
+  summarise(
+    Teams = n(),
+    `3PAr` = mean(`3PAr`, na.rm = TRUE),
+    `TS%` = mean(`TS%`, na.rm = TRUE),
+    ORtg = mean(ORtg, na.rm = TRUE),
+    FTr = mean(FTr, na.rm = TRUE),
+    Team_List = paste(sort(Tm), collapse = ", "),
+    .groups = "drop"
+  ) %>%
+  assign_cluster_label_simple() %>%
+  mutate(
+    Cluster_Display = glue::glue("Cluster {Cluster}: {Cluster_Label}")
+  ) %>%
+  arrange(desc(`3PAr`), desc(`TS%`))
+
+team_cluster_simple <- team_cluster_simple %>%
+  left_join(
+    cluster_centers_simple %>%
+      select(Cluster, Cluster_Label, Cluster_Display),
+    by = "Cluster"
+  ) %>%
+  mutate(
+    Cluster_Display = factor(
+      Cluster_Display,
+      levels = cluster_centers_simple$Cluster_Display
+    )
+  )
+
+simple_cluster_cor <- cor(
+  team_cluster_simple$`3PAr`,
+  team_cluster_simple$`TS%`,
+  use = "complete.obs"
+)
+
+section_5_label_data <- team_cluster_simple %>%
+  distinct(Tm, .keep_all = TRUE)
+
+section_5_ellipse_data <- team_cluster_simple %>%
+  group_by(Cluster_Display) %>%
+  filter(n() >= 3) %>%
+  ungroup()
+
+section_5_cluster_levels <- levels(team_cluster_simple$Cluster_Display)
+
+section_5_rich_palette <- setNames(
+  c("#d4a017", "#1d4ed8", "#15803d", "#b91c1c")[seq_along(section_5_cluster_levels)],
+  section_5_cluster_levels
+)
+
+section_5_cluster_plot <- ggplot(
+  team_cluster_simple,
+  aes(
+    x = `3PAr`,
+    y = `TS%`
+  )
+) +
+  stat_ellipse(
+    data = section_5_ellipse_data,
+    aes(
+      fill = Cluster_Display,
+      group = Cluster_Display
+    ),
+    geom = "polygon",
+    alpha = 0.12,
+    color = NA,
+    level = 0.80,
+    show.legend = FALSE
+  ) +
+  stat_ellipse(
+    data = section_5_ellipse_data,
+    aes(
+      color = Cluster_Display,
+      group = Cluster_Display
+    ),
+    linewidth = 1.1,
+    alpha = 0.75,
+    level = 0.80,
+    show.legend = FALSE
+  ) +
+  geom_vline(
+    xintercept = median(team_cluster_simple$`3PAr`, na.rm = TRUE),
+    linetype = "dashed",
+    linewidth = 0.7,
+    alpha = 0.55
+  ) +
+  geom_hline(
+    yintercept = median(team_cluster_simple$`TS%`, na.rm = TRUE),
+    linetype = "dashed",
+    linewidth = 0.7,
+    alpha = 0.55
+  ) +
+  geom_point(
+    aes(color = Cluster_Display),
+    size = 7.4,
+    alpha = 0.92
+  ) +
+  ggrepel::geom_label_repel(
+    data = section_5_label_data,
+    aes(
+      label = Tm,
+      color = Cluster_Display
+    ),
+    size = 4.8,
+    fontface = "bold",
+    fill = scales::alpha("white", 0.88),
+    label.size = 0.18,
+    max.overlaps = Inf,
+    min.segment.length = 0,
+    box.padding = 0.55,
+    point.padding = 0.40,
+    segment.alpha = 0.45,
+    show.legend = FALSE
+  ) +
+  scale_color_manual(
+    name = "Offensive Profile",
+    values = section_5_rich_palette,
+    labels = function(x) {
+      x %>%
+        str_remove("^Cluster [0-9]+: ") %>%
+        str_wrap(width = 24)
+    }
+  ) +
+  scale_fill_manual(
+    values = section_5_rich_palette,
+    guide = "none"
+  ) +
+  scale_x_continuous(
+    labels = percent_format(accuracy = 1)
+  ) +
+  scale_y_continuous(
+    labels = percent_format(accuracy = 1)
+  ) +
+  guides(
+    color = guide_legend(
+      nrow = 2,
+      byrow = TRUE,
+      override.aes = list(
+        size = 5.5,
+        alpha = 1
+      )
+    )
+  ) +
+  labs(
+    title = "Team Clusters by Three-Point Volume and Scoring Efficiency",
+    subtitle = glue::glue("{season_label} NBA season | Simple model using 3PAr and TS%"),
+    x = "Three-point attempt rate",
+    y = "True shooting percentage",
+    caption = glue::glue("Dashed lines show league medians | 3PAr vs TS% correlation: {round(simple_cluster_cor, 3)}")
+  ) +
+  theme(
+    legend.position = "bottom",
+    legend.title = element_text(face = "bold", color = "#102a43"),
+    legend.text = element_text(size = 9.5, color = "#374151"),
+    legend.key.width = unit(1.1, "cm"),
+    legend.box.margin = margin(t = 6),
+    panel.grid.major = element_line(color = "#e5e7eb", linewidth = 0.35)
+  )
+
+print(section_5_cluster_plot)
+```
+
+```{r section-5-simple-cluster-table}
+section_5_table_colors <- tibble::tibble(
+  Cluster_Display = section_5_cluster_levels,
+  Cluster_Color = unname(section_5_rich_palette[section_5_cluster_levels]),
+  Cluster_Tint = c("#fef9c3", "#dbeafe", "#dcfce7", "#fee2e2")[seq_along(section_5_cluster_levels)]
+)
+
+section_5_table_data <- cluster_centers_simple %>%
+  left_join(section_5_table_colors, by = "Cluster_Display") %>%
+  mutate(
+    Cluster_Name = str_remove(Cluster_Display, "^Cluster [0-9]+: "),
+    Cluster_Key = glue::glue(
+      "<span style='font-size:16px;color:{Cluster_Color};'>●</span> <b>{Cluster_Name}</b>"
+    ),
+    Team_List = Team_List %>%
+      str_replace_all(", ", " · ") %>%
+      str_wrap(width = 42) %>%
+      str_replace_all("\n", "<br>")
+  ) %>%
+  select(
+    Cluster_Display,
+    Cluster_Tint,
+    Cluster_Key,
+    Teams,
+    `3PAr`,
+    `TS%`,
+    ORtg,
+    FTr,
+    Team_List
+  )
+
+section_5_cluster_table <- section_5_table_data %>%
+  gt() %>%
+  tab_header(
+    title = md("**Simple Cluster Summary**"),
+    subtitle = "Four offensive profiles based only on three-point volume and true shooting."
+  ) %>%
+  fmt_markdown(
+    columns = c(Cluster_Key, Team_List)
+  ) %>%
+  fmt_percent(
+    columns = c(`3PAr`, `TS%`, FTr),
+    decimals = 1
+  ) %>%
+  fmt_number(
+    columns = c(ORtg),
+    decimals = 1
+  ) %>%
+  cols_label(
+    Cluster_Key = "Cluster",
+    Teams = "N",
+    `3PAr` = "3PAr",
+    `TS%` = "TS%",
+    ORtg = "ORtg",
+    FTr = "FTr",
+    Team_List = "Teams"
+  ) %>%
+  tab_spanner(
+    label = "Cluster Group",
+    columns = c(Cluster_Key, Teams, Team_List)
+  ) %>%
+  tab_spanner(
+    label = "Shot Profile",
+    columns = c(`3PAr`, `TS%`)
+  ) %>%
+  tab_spanner(
+    label = "Context",
+    columns = c(ORtg, FTr)
+  ) %>%
+  cols_hide(
+    columns = c(Cluster_Display, Cluster_Tint)
+  ) %>%
+  cols_align(
+    align = "center",
+    columns = c(Teams, `3PAr`, `TS%`, ORtg, FTr)
+  ) %>%
+  cols_align(
+    align = "left",
+    columns = c(Cluster_Key, Team_List)
+  ) %>%
+  cols_width(
+    Cluster_Key ~ px(190),
+    Teams ~ px(45),
+    `3PAr` ~ px(68),
+    `TS%` ~ px(68),
+    ORtg ~ px(68),
+    FTr ~ px(68),
+    Team_List ~ px(315)
+  ) %>%
+  tab_style(
+    style = list(
+      cell_fill(color = "#e0f2fe"),
+      cell_text(weight = "bold", color = "#0f172a")
+    ),
+    locations = cells_column_spanners(spanners = "Cluster Group")
+  ) %>%
+  tab_style(
+    style = list(
+      cell_fill(color = "#fef3c7"),
+      cell_text(weight = "bold", color = "#78350f")
+    ),
+    locations = cells_column_spanners(spanners = "Shot Profile")
+  ) %>%
+  tab_style(
+    style = list(
+      cell_fill(color = "#dcfce7"),
+      cell_text(weight = "bold", color = "#14532d")
+    ),
+    locations = cells_column_spanners(spanners = "Context")
+  ) %>%
+  tab_style(
+    style = list(
+      cell_text(size = px(11))
+    ),
+    locations = cells_body(columns = c(Team_List))
+  ) %>%
+  tab_style(
+    style = list(
+      cell_text(weight = "bold")
+    ),
+    locations = cells_body(columns = c(Cluster_Key, `3PAr`, `TS%`))
+  ) %>%
+  style_article_gt(header_color = "#17324d", column_color = "#d9e2ec") %>%
+  tab_options(
+    table.width = gt::pct(100),
+    table.layout = "fixed",
+    table.font.size = px(12),
+    data_row.padding = px(4),
+    column_labels.padding = px(5),
+    heading.padding = px(6)
+  ) %>%
+  tab_source_note(
+    source_note = "Cluster colors match the plot. This simple model only uses 3PAr and TS%; ORtg and FTr are shown as context."
+  )
+
+for (i in seq_len(nrow(section_5_table_data))) {
+  section_5_cluster_table <- section_5_cluster_table %>%
+    tab_style(
+      style = list(
+        cell_fill(color = section_5_table_data$Cluster_Tint[i])
+      ),
+      locations = cells_body(
+        columns = c(Cluster_Key, Teams, `3PAr`, `TS%`, ORtg, FTr, Team_List),
+        rows = Cluster_Display == section_5_table_data$Cluster_Display[i]
+      )
+    )
+}
+
+section_5_cluster_table
+```
+
+```{r section-5-simple-cluster-interpretation, results='asis'}
+simple_best_ts <- cluster_centers_simple %>%
+  arrange(desc(`TS%`), desc(`3PAr`)) %>%
+  slice(1)
+
+simple_highest_3par <- cluster_centers_simple %>%
+  arrange(desc(`3PAr`), desc(`TS%`)) %>%
+  slice(1)
+
+simple_highest_3par_label <- simple_highest_3par %>%
+  pull(Cluster_Display)
+
+simple_highest_3par_value <- simple_highest_3par %>%
+  pull(`3PAr`)
+
+simple_highest_3par_ts <- simple_highest_3par %>%
+  pull(`TS%`)
+
+simple_best_ts_label <- simple_best_ts %>%
+  pull(Cluster_Display)
+
+simple_best_ts_value <- simple_best_ts %>%
+  pull(`TS%`)
+
+cat(glue::glue("
+
+The first cluster view weakens the old, easy version of the three-point premium. The correlation between three-point attempt rate and true shooting percentage is only {round(simple_cluster_cor, 3)}, which means higher volume does not clearly equal better efficiency. The highest-volume cluster is {simple_highest_3par_label}, with an average 3PAr of {pct_fmt(simple_highest_3par_value)} and an average TS% of {pct_fmt(simple_highest_3par_ts)}. The most efficient cluster is {simple_best_ts_label}, with an average TS% of {pct_fmt(simple_best_ts_value)}.
+
+That gap is the story. Shooting more threes can still be part of a great offense, but volume does not guarantee the premium anymore. The value has to come from the quality of the looks, the shooters taking them, the spacing around them, and the pressure created elsewhere on the floor.
+"))
+```
+
+## The Missing Context: Fouls, Efficiency, and Balance
+
+```{r section-6-expanded-clustering-setup, results='asis'}
+cat(glue::glue("
+
+The simple view shows that volume alone is not enough. The expanded view helps explain why. It keeps 3PAr and TS%, but adds FTr and ORtg so the clusters can account for foul pressure and overall offensive strength. A three creates obvious value because it is worth an extra point, but a two-point attack can create value in other ways.
+
+Rim pressure, free throws, defensive rotations, and cleaner looks later in the possession all matter. The better version of the three-point premium is not just about how often a team shoots from deep. It is about whether those threes are part of an offense that still bends the defense.
+
+"))
+```
+
+```{r section-6-expanded-clustering}
+if (!exists("team_cluster_base")) {
+  team_cluster_base <- team_advanced %>%
+    drop_na(`3PAr`, `TS%`, FTr, ORtg) %>%
+    mutate(
+      Team_Label = Tm
+    )
+}
+
+cluster_input_expanded <- team_cluster_base %>%
+  select(`3PAr`, `TS%`, FTr, ORtg) %>%
+  scale()
+
+expanded_kmeans <- kmeans(
+  cluster_input_expanded,
+  centers = cluster_k_expanded,
+  nstart = 50
+)
+
+team_cluster_expanded <- team_cluster_base %>%
+  mutate(
+    Cluster = factor(expanded_kmeans$cluster)
+  )
+
+cluster_centers_expanded <- team_cluster_expanded %>%
+  group_by(Cluster) %>%
+  summarise(
+    Teams = n(),
+    `3PAr` = mean(`3PAr`, na.rm = TRUE),
+    `TS%` = mean(`TS%`, na.rm = TRUE),
+    FTr = mean(FTr, na.rm = TRUE),
+    ORtg = mean(ORtg, na.rm = TRUE),
+    Team_List = paste(sort(Tm), collapse = ", "),
+    .groups = "drop"
+  ) %>%
+  assign_cluster_label_expanded() %>%
+  mutate(
+    Cluster_Display = glue::glue("Cluster {Cluster}: {Cluster_Label}")
+  ) %>%
+  arrange(desc(ORtg), desc(`TS%`), desc(`3PAr`))
+
+team_cluster_expanded <- team_cluster_expanded %>%
+  left_join(
+    cluster_centers_expanded %>%
+      select(Cluster, Cluster_Label, Cluster_Display),
+    by = "Cluster"
+  ) %>%
+  mutate(
+    Cluster_Display = factor(
+      Cluster_Display,
+      levels = cluster_centers_expanded$Cluster_Display
+    )
+  )
+
+expanded_3par_ortg_cor <- cor(
+  team_cluster_expanded$`3PAr`,
+  team_cluster_expanded$ORtg,
+  use = "complete.obs"
+)
+
+expanded_3par_ts_cor <- cor(
+  team_cluster_expanded$`3PAr`,
+  team_cluster_expanded$`TS%`,
+  use = "complete.obs"
+)
+
+expanded_ftr_ortg_cor <- cor(
+  team_cluster_expanded$FTr,
+  team_cluster_expanded$ORtg,
+  use = "complete.obs"
+)
+
+section_6_label_data <- team_cluster_expanded %>%
+  distinct(Tm, .keep_all = TRUE)
+
+section_6_ellipse_data <- team_cluster_expanded %>%
+  group_by(Cluster_Display) %>%
+  filter(n() >= 3) %>%
+  ungroup()
+
+section_6_cluster_levels <- levels(team_cluster_expanded$Cluster_Display)
+
+section_6_rich_palette <- setNames(
+  c("#d4a017", "#1d4ed8", "#15803d", "#b91c1c")[seq_along(section_6_cluster_levels)],
+  section_6_cluster_levels
+)
+
+section_6_cluster_plot <- ggplot(
+  team_cluster_expanded,
+  aes(
+    x = `3PAr`,
+    y = `TS%`
+  )
+) +
+  stat_ellipse(
+    data = section_6_ellipse_data,
+    aes(
+      fill = Cluster_Display,
+      group = Cluster_Display
+    ),
+    geom = "polygon",
+    alpha = 0.12,
+    color = NA,
+    level = 0.80,
+    show.legend = FALSE
+  ) +
+  stat_ellipse(
+    data = section_6_ellipse_data,
+    aes(
+      color = Cluster_Display,
+      group = Cluster_Display
+    ),
+    linewidth = 1.1,
+    alpha = 0.75,
+    level = 0.80,
+    show.legend = FALSE
+  ) +
+  geom_vline(
+    xintercept = median(team_cluster_expanded$`3PAr`, na.rm = TRUE),
+    linetype = "dashed",
+    linewidth = 0.7,
+    alpha = 0.55
+  ) +
+  geom_hline(
+    yintercept = median(team_cluster_expanded$`TS%`, na.rm = TRUE),
+    linetype = "dashed",
+    linewidth = 0.7,
+    alpha = 0.55
+  ) +
+  geom_point(
+    aes(color = Cluster_Display),
+    size = 7.4,
+    alpha = 0.92
+  ) +
+  ggrepel::geom_label_repel(
+    data = section_6_label_data,
+    aes(
+      label = Tm,
+      color = Cluster_Display
+    ),
+    size = 4.8,
+    fontface = "bold",
+    fill = scales::alpha("white", 0.88),
+    label.size = 0.18,
+    max.overlaps = Inf,
+    min.segment.length = 0,
+    box.padding = 0.55,
+    point.padding = 0.40,
+    segment.alpha = 0.45,
+    show.legend = FALSE
+  ) +
+  scale_color_manual(
+    name = "Offensive Profile",
+    values = section_6_rich_palette,
+    labels = function(x) {
+      x %>%
+        str_remove("^Cluster [0-9]+: ") %>%
+        str_wrap(width = 24)
+    }
+  ) +
+  scale_fill_manual(
+    values = section_6_rich_palette,
+    guide = "none"
+  ) +
+  scale_x_continuous(
+    labels = percent_format(accuracy = 1)
+  ) +
+  scale_y_continuous(
+    labels = percent_format(accuracy = 1)
+  ) +
+  guides(
+    color = guide_legend(
+      nrow = 2,
+      byrow = TRUE,
+      override.aes = list(
+        size = 5.5,
+        alpha = 1
+      )
+    )
+  ) +
+  labs(
+    title = "Expanded Team Clusters",
+    subtitle = glue::glue("{season_label} NBA season | Model uses 3PAr, TS%, FTr, and ORtg"),
+    x = "Three-point attempt rate",
+    y = "True shooting percentage",
+    caption = glue::glue("Dashed lines show league medians | 3PAr vs ORtg correlation: {round(expanded_3par_ortg_cor, 3)}")
+  ) +
+  theme(
+    legend.position = "bottom",
+    legend.title = element_text(face = "bold", color = "#102a43"),
+    legend.text = element_text(size = 9.5, color = "#374151"),
+    legend.key.width = unit(1.1, "cm"),
+    legend.box.margin = margin(t = 6),
+    panel.grid.major = element_line(color = "#e5e7eb", linewidth = 0.35)
+  )
+
+print(section_6_cluster_plot)
+```
+
+```{r section-6-expanded-cluster-table}
+section_6_table_colors <- tibble::tibble(
+  Cluster_Display = section_6_cluster_levels,
+  Cluster_Color = unname(section_6_rich_palette[section_6_cluster_levels]),
+  Cluster_Tint = c("#fef9c3", "#dbeafe", "#dcfce7", "#fee2e2")[seq_along(section_6_cluster_levels)]
+)
+
+section_6_table_data <- cluster_centers_expanded %>%
+  left_join(section_6_table_colors, by = "Cluster_Display") %>%
+  mutate(
+    Cluster_Name = str_remove(Cluster_Display, "^Cluster [0-9]+: "),
+    Cluster_Key = glue::glue(
+      "<span style='font-size:16px;color:{Cluster_Color};'>●</span> <b>{Cluster_Name}</b>"
+    ),
+    Team_List = Team_List %>%
+      str_replace_all(", ", " · ") %>%
+      str_wrap(width = 42) %>%
+      str_replace_all("\n", "<br>")
+  ) %>%
+  select(
+    Cluster_Display,
+    Cluster_Tint,
+    Cluster_Key,
+    Teams,
+    `3PAr`,
+    `TS%`,
+    FTr,
+    ORtg,
+    Team_List
+  )
+
+section_6_cluster_table <- section_6_table_data %>%
+  gt() %>%
+  tab_header(
+    title = md("**Expanded Cluster Summary**"),
+    subtitle = "Four offensive profiles based on volume, efficiency, foul pressure, and offensive rating."
+  ) %>%
+  fmt_markdown(
+    columns = c(Cluster_Key, Team_List)
+  ) %>%
+  fmt_percent(
+    columns = c(`3PAr`, `TS%`, FTr),
+    decimals = 1
+  ) %>%
+  fmt_number(
+    columns = c(ORtg),
+    decimals = 1
+  ) %>%
+  cols_label(
+    Cluster_Key = "Cluster",
+    Teams = "N",
+    `3PAr` = "3PAr",
+    `TS%` = "TS%",
+    FTr = "FTr",
+    ORtg = "ORtg",
+    Team_List = "Teams"
+  ) %>%
+  tab_spanner(
+    label = "Cluster Group",
+    columns = c(Cluster_Key, Teams, Team_List)
+  ) %>%
+  tab_spanner(
+    label = "Shot Profile",
+    columns = c(`3PAr`, `TS%`)
+  ) %>%
+  tab_spanner(
+    label = "Pressure / Results",
+    columns = c(FTr, ORtg)
+  ) %>%
+  cols_hide(
+    columns = c(Cluster_Display, Cluster_Tint)
+  ) %>%
+  cols_align(
+    align = "center",
+    columns = c(Teams, `3PAr`, `TS%`, FTr, ORtg)
+  ) %>%
+  cols_align(
+    align = "left",
+    columns = c(Cluster_Key, Team_List)
+  ) %>%
+  cols_width(
+    Cluster_Key ~ px(190),
+    Teams ~ px(45),
+    `3PAr` ~ px(68),
+    `TS%` ~ px(68),
+    FTr ~ px(68),
+    ORtg ~ px(70),
+    Team_List ~ px(315)
+  ) %>%
+  tab_style(
+    style = list(
+      cell_fill(color = "#e0f2fe"),
+      cell_text(weight = "bold", color = "#0f172a")
+    ),
+    locations = cells_column_spanners(spanners = "Cluster Group")
+  ) %>%
+  tab_style(
+    style = list(
+      cell_fill(color = "#fef3c7"),
+      cell_text(weight = "bold", color = "#78350f")
+    ),
+    locations = cells_column_spanners(spanners = "Shot Profile")
+  ) %>%
+  tab_style(
+    style = list(
+      cell_fill(color = "#dcfce7"),
+      cell_text(weight = "bold", color = "#14532d")
+    ),
+    locations = cells_column_spanners(spanners = "Pressure / Results")
+  ) %>%
+  tab_style(
+    style = list(
+      cell_text(size = px(11))
+    ),
+    locations = cells_body(columns = c(Team_List))
+  ) %>%
+  tab_style(
+    style = list(
+      cell_text(weight = "bold")
+    ),
+    locations = cells_body(columns = c(Cluster_Key, `3PAr`, `TS%`, FTr, ORtg))
+  ) %>%
+  style_article_gt(header_color = "#17324d", column_color = "#d9e2ec") %>%
+  tab_options(
+    table.width = gt::pct(100),
+    table.layout = "fixed",
+    table.font.size = px(12),
+    data_row.padding = px(4),
+    column_labels.padding = px(5),
+    heading.padding = px(6)
+  ) %>%
+  tab_source_note(
+    source_note = "Cluster colors match the plot. The expanded model uses 3PAr, TS%, FTr, and ORtg."
+  )
+
+for (i in seq_len(nrow(section_6_table_data))) {
+  section_6_cluster_table <- section_6_cluster_table %>%
+    tab_style(
+      style = list(
+        cell_fill(color = section_6_table_data$Cluster_Tint[i])
+      ),
+      locations = cells_body(
+        columns = c(Cluster_Key, Teams, `3PAr`, `TS%`, FTr, ORtg, Team_List),
+        rows = Cluster_Display == section_6_table_data$Cluster_Display[i]
+      )
+    )
+}
+
+section_6_cluster_table
+```
+
+```{r section-6-expanded-cluster-interpretation, results='asis'}
+expanded_best_ortg <- cluster_centers_expanded %>%
+  arrange(desc(ORtg), desc(`TS%`), desc(FTr)) %>%
+  slice(1)
+
+expanded_highest_3par <- cluster_centers_expanded %>%
+  arrange(desc(`3PAr`), desc(ORtg)) %>%
+  slice(1)
+
+expanded_best_ftr <- cluster_centers_expanded %>%
+  arrange(desc(FTr), desc(ORtg)) %>%
+  slice(1)
+
+cat(glue::glue("
+The expanded model changes the story by adding context to the simple shot-profile view. The chart still shows **3PAr** and **TS%**, but the clusters are now built with **FTr** and **ORtg** included. Teams can move into different offensive groups even if they look similar on the basic two-variable chart. The best offensive-rating cluster is **{expanded_best_ortg$Cluster_Display}**, with an average ORtg of **{num_fmt(expanded_best_ortg$ORtg)}**, an average TS% of **{pct_fmt(expanded_best_ortg$`TS%`)}**, and an average 3PAr of **{pct_fmt(expanded_best_ortg$`3PAr`)}**. The highest three-point-volume cluster is **{expanded_highest_3par$Cluster_Display}**, with an average 3PAr of **{pct_fmt(expanded_highest_3par$`3PAr`)}** and an average ORtg of **{num_fmt(expanded_highest_3par$ORtg)}**.
+
+The foul-pressure piece matters too. The strongest FTr cluster is **{expanded_best_ftr$Cluster_Display}**, with an average FTr of **{pct_fmt(expanded_best_ftr$FTr)}**. That helps explain why the three-point premium cannot be judged by volume alone. A team can create value by spacing the floor, but it can also create value by pressuring the rim, getting to the line, and forcing defenses to guard more than one thing. The modern premium still lives beyond the arc, but it works best when it is part of a fuller offensive profile.
+
+"))
+```
+
+
+## Where the Premium Actually Lives
+
+```{r section-7-cluster-takeaways-data}
+if (!exists("simple_cluster_cor")) {
+  stop("Simple cluster correlation is missing. Run the simple clustering section first.")
+}
+
+if (!exists("expanded_3par_ortg_cor")) {
+  stop("Expanded 3PAr vs ORtg correlation is missing. Run the expanded clustering section first.")
+}
+
+if (!exists("expanded_ftr_ortg_cor")) {
+  stop("Expanded FTr vs ORtg correlation is missing. Run the expanded clustering section first.")
+}
+```
+
+```{r section-7-cluster-takeaways-interpretation, results='asis'}
+cat(glue::glue("
+The clusters make the modern three-point story less clean, but more useful. The league has already corrected the old market inefficiency. Teams know threes matter. The harder part is figuring out which teams are actually turning that math into better offense. The simple model shows the problem with treating every three as equal. The correlation between 3PAr and TS% is only {round(simple_cluster_cor, 3)}, which means volume by itself does not separate efficient offenses the way it might have when the league was slower to embrace the shot.
+
+The expanded model gets closer to the real basketball. The correlation between 3PAr and ORtg is {round(expanded_3par_ortg_cor, 3)}, while the relationship between FTr and ORtg is {round(expanded_ftr_ortg_cor, 3)}. Free throws are part of shot value too. A team that pressures the rim and gets to the line can create efficient offense without building everything around maximum three-point volume. That is the difference between a shot profile and a full offense.
+
+The premium still exists, but it is more conditional now. A high-volume, high-efficiency team is not the same thing as a high-volume, average-efficiency team. Both may shoot a lot of threes, but only one is really capturing the edge. Good threes still matter. They matter most when they come with spacing, rim pressure, foul pressure, and enough balance to keep the defense from loading up on one thing.
+"))
+```
+
+## The Conditional Three-Point Premium
+
+```{r section-8-final-answer-data}
+if (!exists("simple_cluster_cor")) {
+  stop("Simple cluster correlation is missing. Run the simple clustering section first.")
+}
+
+if (!exists("expanded_3par_ortg_cor")) {
+  stop("Expanded 3PAr/ORtg correlation is missing. Run the expanded clustering section first.")
+}
+
+if (!exists("expanded_ftr_ortg_cor")) {
+  stop("Expanded FTr/ORtg correlation is missing. Run the expanded clustering section first.")
+}
+```
+
+```{r section-8-final-answer, results='asis'}
+cat(glue::glue("
+The three-point premium is still real. It is just not automatic anymore. A good three remains one of the best shots in basketball, especially when it comes from an elite shooter with space. Steph Curry is the easiest example because his range changes the defense before the shot even happens. The threat itself creates value because defenders have to stretch around him.
+
+The league-wide edge is different now. The simple model shows why. The correlation between 3PAr and TS% is only {round(simple_cluster_cor, 3)}, which means three-point volume alone does not clearly explain scoring efficiency. The expanded model adds the missing context. The correlation between 3PAr and ORtg is {round(expanded_3par_ortg_cor, 3)}, while the relationship between FTr and ORtg is {round(expanded_ftr_ortg_cor, 3)}.
+
+The basic math still matters, but possessions are not that simple. Three points are worth more than two, yet a two-point attack can still create efficient offense by getting to the rim, drawing fouls, and forcing rotations. A three-heavy offense can also lose value if too many of those shots are rushed, contested, or taken by the wrong players.
+
+The old advantage came from understanding the math before everyone else did. That edge has mostly been squeezed out. What remains is more specific. The premium belongs to the right shooters, taking the right shots, inside offenses that still pressure the defense in other ways. The NBA should not stop shooting threes. It should just be more honest about which threes are actually worth living with rather than dying for. Which just goes to show, you either live three or you die trying.
+"))
+```
