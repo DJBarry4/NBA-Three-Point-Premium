@@ -18,4 +18,4 @@ The analysis uses clustering to group NBA teams by offensive profile and then co
 
 ## Published Article
 
-https://rpubs.com/djbarry_4/1444128
+https://rpubs.com/djbarry_4/1444459
